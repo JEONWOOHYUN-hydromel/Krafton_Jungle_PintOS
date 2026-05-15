@@ -5,6 +5,7 @@
 #include <list.h>
 #include <stdint.h>
 #include "threads/interrupt.h"
+#include "threads/synch.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -38,6 +39,10 @@ typedef int tid_t;
                                         /* 기본 우선순위. */
 #define PRI_MAX 63                      /* Highest priority. */
                                         /* 가장 높은 우선순위. */
+
+/* File descriptor. */
+#define FD_MAX 128
+#define FD_MIN 3
 
 /* A kernel thread or user process.
  *
@@ -110,13 +115,7 @@ struct thread {
 	char name[16];                      /* Name (for debugging purposes). */
 	                                    /* 디버깅용 스레드 이름. */
 
-	/*priority*/
 	int priority;                       /* Priority. */
-	int original_priority;              /* Original priority before donation. */
-	struct list donations;              /* List of donations. */
-	struct list_elem donation_elem;     /* List element for donation list. */
-	struct lock *waiting_lock;          /* The lock that the thread is waiting for (if any). */
-
 	int64_t wakeup_tick;                   /* Tick to wake up sleeping thread. */
 	                                      /* 잠든 스레드가 다시 깨어나야 하는 타이머 틱. */
 
@@ -128,9 +127,18 @@ struct thread {
 	/* timer_sleep()으로 잠든 스레드를 sleeping_list에 연결하기 위한 리스트 요소. */
 	struct list_elem elem_sleep;              /* List element. */
 
+	/* thread parent-child relationship */
+	struct list children;
+	struct child_status *my_status;
+	int exit_status;
+
+	
+
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
+	struct file *exec_file; /* The file that the thread is currently running. */
 	uint64_t *pml4;                     /* Page map level 4 */
+	struct file *fd_file[FD_MAX];				/* Open files. */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
@@ -141,6 +149,19 @@ struct thread {
 	struct intr_frame tf;               /* Information for switching */
 	unsigned magic;                     /* Detects stack overflow. */
 };
+
+
+/* child status structure for tracking child thread information */
+struct child_status {
+    tid_t tid;
+    int exit_status;
+    bool waited;
+    bool exited;
+	bool is_orphan;
+    struct semaphore wait_sema;
+    struct list_elem elem;
+};
+
 
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
@@ -178,15 +199,16 @@ void thread_yield (void);
 int thread_get_priority (void);
 void thread_set_priority (int);
 
-void donate_priority (struct thread *donor, struct thread *recipient);
-void remove_with_lock (struct lock *lock);
-void refresh_priority (struct thread *t);
-
 int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 void do_iret (struct intr_frame *tf);
+
+void set_thread_name (const char *name);
+
+/* parent-child relationship */
+struct child_status *create_child_status (struct thread *parent);
 
 #endif /* threads/thread.h */

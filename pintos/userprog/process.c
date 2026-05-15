@@ -23,6 +23,8 @@
 #include "vm/vm.h"
 #endif
 
+#define MAX_ARGS 32
+
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
@@ -51,23 +53,53 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
-	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
-	if (tid == TID_ERROR)
+	/* Pass child info to child. */
+	struct exec_info *info = palloc_get_page (PAL_ZERO);
+	if (info == NULL) {
 		palloc_free_page (fn_copy);
+		return TID_ERROR;
+	}
+	info->file_name = fn_copy;
+	info->status = create_child_status (thread_current ());
+	if (info->status == NULL) {
+		palloc_free_page (info);
+		palloc_free_page (fn_copy);
+		return TID_ERROR;
+	}
+	struct child_status *status = info->status;
+
+	/* Create a new thread to execute FILE_NAME. */
+	tid = thread_create (file_name, PRI_DEFAULT, initd, info);
+	if (tid == TID_ERROR) {
+		list_remove (&status->elem);
+		palloc_free_page (status);
+		palloc_free_page (info);
+		palloc_free_page (fn_copy);
+	} else {
+		status->tid = tid;
+	}
 	return tid;
 }
 
 /* A thread function that launches first user process. */
 static void
 initd (void *f_name) {
+	struct exec_info *info = f_name;
+	char *file_name = info->file_name;
+	thread_current ()->my_status = info->status;
+
+	/* set thread name */
+	set_thread_name(file_name);
+	
+	palloc_free_page (info);
+
 #ifdef VM
 	supplemental_page_table_init (&thread_current ()->spt);
 #endif
 
 	process_init ();
 
-	if (process_exec (f_name) < 0)
+	if (process_exec (file_name) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
 }
@@ -75,10 +107,48 @@ initd (void *f_name) {
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
+process_fork (const char *name, struct intr_frame *if_) {
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	struct fork_info *info = palloc_get_page (PAL_ZERO);
+	if (info == NULL)
+		return TID_ERROR;
+	
+	info->parent = thread_current ();
+	memcpy (&info->if_, if_, sizeof (struct intr_frame));
+
+	info->child_status = create_child_status (thread_current ());
+	if (info->child_status == NULL) {
+		palloc_free_page (info);
+		return TID_ERROR;
+	}
+
+	sema_init(&info->fork_sema, 0);
+
+	info->is_fork_success = false;
+
+	//create thread
+	tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, info);
+	if (tid == TID_ERROR) {
+		list_remove (&info->child_status->elem);
+		palloc_free_page (info->child_status);
+		palloc_free_page (info);
+		return TID_ERROR;
+	}
+
+	info->child_status->tid = tid;
+
+	sema_down (&info->fork_sema);
+
+	if (!info->is_fork_success) {
+		list_remove (&info->child_status->elem);
+		palloc_free_page (info->child_status);
+		palloc_free_page (info);
+		return TID_ERROR;
+	}
+
+	palloc_free_page (info);
+
+	return tid;
 }
 
 #ifndef VM
@@ -93,21 +163,35 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	if (is_kernel_vaddr (va)) {
+		return true;
+	}
 
 	/* 2. Resolve VA from the parent's page map level 4. */
 	parent_page = pml4_get_page (parent->pml4, va);
+	if (parent_page == NULL) {
+		return false;
+	}
 
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
+	newpage = palloc_get_page (PAL_USER);
+	if (newpage == NULL) {
+		return false;
+	}
 
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	memcpy (newpage, parent_page, PGSIZE);
+	writable = is_writable (pte);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
+		palloc_free_page (newpage);
+		return false;
 	}
 	return true;
 }
@@ -120,14 +204,15 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 static void
 __do_fork (void *aux) {
 	struct intr_frame if_;
-	struct thread *parent = (struct thread *) aux;
+	struct fork_info *fork_info = (struct fork_info *) aux;
+	struct thread *parent = fork_info->parent;
 	struct thread *current = thread_current ();
-	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
-	bool succ = true;
+	struct intr_frame *parent_if = &fork_info->if_;
+	fork_info->is_fork_success = false;
 
 	/* 1. Read the cpu context to local stack. */
 	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	if_.R.rax = 0;
 
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
@@ -149,13 +234,45 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	
+	// set prioity
+	thread_set_priority (parent->priority);
+
+	// set child_status
+	current->my_status = fork_info->child_status;
+
+	//fd
+	for (int fd = 0; fd < FD_MAX; fd++) {
+		if (parent->fd_file[fd] != NULL) {
+			current->fd_file[fd] = file_duplicate(parent->fd_file[fd]);
+			if (current->fd_file[fd] == NULL) {
+				for (int i = 0; i < fd; i++) {
+					if (current->fd_file[i] != NULL) {
+						file_close(current->fd_file[i]);
+						current->fd_file[i] = NULL;
+					}
+				}
+				goto error;
+			}
+		}
+	}
+
+	if (parent->exec_file != NULL) {
+		current->exec_file = file_duplicate(parent->exec_file);
+		if (current->exec_file == NULL) {
+			goto error;
+		}
+	}
 
 	process_init ();
 
+	fork_info->is_fork_success = true;
+	sema_up (&fork_info->fork_sema);
+
 	/* Finally, switch to the newly created process. */
-	if (succ)
-		do_iret (&if_);
+	do_iret (&if_);
 error:
+	sema_up (&fork_info->fork_sema);
 	thread_exit ();
 }
 
@@ -205,6 +322,31 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+	
+	 struct thread *current = thread_current ();
+	 struct list_elem *e;
+
+	 for (e = list_begin (&current->children); e != list_end (&current->children);
+			e = list_next (e)) {
+		struct child_status *child = list_entry (e, struct child_status, elem);
+		
+		if (child->tid == child_tid) {
+			if (child->waited) {
+				return -1;
+			}
+
+			child->waited = true;
+			
+			if (!child->exited) {
+				sema_down (&child->wait_sema);
+			}
+
+			int exit_status = child->exit_status;
+			list_remove (&child->elem);
+			palloc_free_page (child);
+			return exit_status;
+		}
+	}
 	return -1;
 }
 
@@ -216,7 +358,43 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
+	
+	 // notice to parent process
+	if (curr->my_status != NULL) {
+		if (curr->my_status->is_orphan) {
+			palloc_free_page (curr->my_status);
+			curr->my_status = NULL;
+		} 
+		
+		else {
+			curr->my_status->exit_status = curr->exit_status;
+			curr->my_status->exited = true;
+			sema_up (&curr->my_status->wait_sema);
+		}
+		
+	}
 
+	// clean up child processes
+	while (!list_empty (&curr->children)) {
+		struct list_elem *e = list_pop_front (&curr->children);
+		struct child_status *child = list_entry (e, struct child_status, elem);
+		
+		if (child->exited) {
+			palloc_free_page (child);
+		} else {
+			child->is_orphan = true;
+		}
+	}
+
+	//fd clean up
+	for (int fd = FD_MIN; fd < FD_MAX; fd++) {
+		if (curr->fd_file[fd] != NULL) {
+			file_close(curr->fd_file[fd]);
+			curr->fd_file[fd] = NULL;
+		}
+	}
+
+	printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
 	process_cleanup ();
 }
 
@@ -228,6 +406,11 @@ process_cleanup (void) {
 #ifdef VM
 	supplemental_page_table_kill (&curr->spt);
 #endif
+
+	if (curr->exec_file != NULL) {
+		file_close (curr->exec_file);
+		curr->exec_file = NULL;
+	}
 
 	uint64_t *pml4;
 	/* Destroy the current process's page directory and switch back
@@ -329,13 +512,37 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
+	char *save_ptr, *parsed_file_name;
+	char *argv[MAX_ARGS];
+	int argc = 0;
 
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();
 	if (t->pml4 == NULL)
 		goto done;
+
 	process_activate (thread_current ());
 
+	/* Parse command line arguments. */
+	if (file_name == NULL)
+		goto done;
+
+	parsed_file_name = strtok_r (file_name, " ", &save_ptr);
+	if (parsed_file_name == NULL)
+		goto done;
+	file_name = parsed_file_name;
+	
+	/* Count arguments & put in argv */
+	argv[0] = parsed_file_name;
+	argc = 1;
+	for (char *token = strtok_r (NULL, " ", &save_ptr); token != NULL;
+			token = strtok_r (NULL, " ", &save_ptr)) {
+		if (argc >= MAX_ARGS) {
+			printf ("Too many arguments. Maximum is %d.\n", MAX_ARGS);
+				goto done;
+		}
+		argv[argc++] = token;
+	}
 	/* Open executable file. */
 	file = filesys_open (file_name);
 	if (file == NULL) {
@@ -417,12 +624,32 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+	if_->R.rdi = argc;
+	if_->rsp = USER_STACK;
+	for (i = argc - 1; i >= 0; i--) {
+		if_->rsp -= strlen (argv[i]) + 1;
+		memcpy ((void *) if_->rsp, argv[i], strlen (argv[i]) + 1);
+		argv[i] = (char *) if_->rsp;
+	}
+	if_->rsp -= (argc + 1) * sizeof (char *);
+	while (if_->rsp % 8 != 0) {
+		if_->rsp--;
+	}
+
+	memcpy ((void *) if_->rsp, argv, argc * sizeof (char *));
+	((char **) if_->rsp)[argc] = NULL;
+	if_->R.rsi = if_->rsp;
+
+	file_deny_write (file);
+	thread_current ()->exec_file = file;
+	file = NULL; /* File ownership transferred to the process. */
 
 	success = true;
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	if (file != NULL)
+		file_close (file);
 	return success;
 }
 

@@ -126,7 +126,6 @@ sema_up (struct semaphore *sema) {
 			should_yield = true;
 		}
 	}
-
 	sema->value++;
 	intr_set_level (old_level);
 
@@ -216,29 +215,7 @@ lock_acquire (struct lock *lock) {
 	ASSERT (!intr_context ());
 	ASSERT (!lock_held_by_current_thread (lock));
 
-	/* 이미 holder가 있으면 현재 스레드는 이 lock을 기다리며 donation을 해야 한다. */
-	if (lock->holder != NULL) {
-		/* donation을 줄 현재 스레드다. */
-		struct thread *current = thread_current ();
-		/* donation을 받을 lock holder다. */
-		struct thread *holder = lock->holder;
-		/* donation_elem을 holder의 donations 리스트에 넣기 전에 연결 상태를 초기화한다. */
-		current->donation_elem.prev = NULL;
-		/* donation_elem의 next 연결도 초기화한다. */
-		current->donation_elem.next = NULL;
-		/* 현재 스레드가 어떤 lock 때문에 기다리는지 기록한다. */
-		current->waiting_lock = lock;
-		/* holder가 받은 donation 목록에 현재 스레드를 추가한다. */
-		list_push_back (&holder->donations, &current->donation_elem);
-		/* holder에게 현재 스레드의 priority를 기부하고 chain donation도 처리한다. */
-		donate_priority (current, holder);
-	}
-
-	/* lock의 semaphore를 실제로 획득할 때까지 잠든다. */
 	sema_down (&lock->semaphore);
-	/* semaphore를 통과했으므로 더 이상 이 lock을 기다리는 상태가 아니다. */
-	thread_current ()->waiting_lock = NULL;
-	/* 현재 스레드를 lock의 새 holder로 기록한다. */
 	lock->holder = thread_current ();
 }
 
@@ -257,10 +234,8 @@ lock_try_acquire (struct lock *lock) {
 	ASSERT (!lock_held_by_current_thread (lock));
 
 	success = sema_try_down (&lock->semaphore);
-	if (success) {
-		thread_current ()->waiting_lock = NULL;
+	if (success)
 		lock->holder = thread_current ();
-	}
 	return success;
 }
 
@@ -276,13 +251,7 @@ lock_release (struct lock *lock) {
 	ASSERT (lock != NULL);
 	ASSERT (lock_held_by_current_thread (lock));
 
-	/* 이 lock 때문에 현재 스레드에게 들어온 donation만 제거한다. */
-	remove_with_lock (lock);
-	/* 남은 donation과 original priority를 기준으로 priority를 다시 계산한다. */
-	refresh_priority (thread_current ());
-	/* lock holder 정보를 비워 lock이 해제됨을 표시한다. */
 	lock->holder = NULL;
-	/* lock semaphore를 올려 대기 중인 스레드 하나를 깨울 수 있게 한다. */
 	sema_up (&lock->semaphore);
 }
 

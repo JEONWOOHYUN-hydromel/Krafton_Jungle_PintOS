@@ -76,7 +76,6 @@ static void schedule (void);
 static tid_t allocate_tid (void);
 static bool ready_has_higher_priority (void);
 
-
 /* Returns true if T appears to point to a valid thread. */
 /* T가 유효한 thread 구조체를 가리키는 것처럼 보이면 true. */
 #define is_thread(t) ((t) != NULL && (t)->magic == THREAD_MAGIC)
@@ -134,6 +133,7 @@ thread_init (void) {
 	init_thread (initial_thread, "main", PRI_DEFAULT);
 	initial_thread->status = THREAD_RUNNING;
 	initial_thread->tid = allocate_tid ();
+	
 }
 
 /* Starts preemptive thread scheduling by enabling interrupts.
@@ -216,6 +216,13 @@ thread_create (const char *name, int priority,
 	init_thread (t, name, priority);
 	tid = t->tid = allocate_tid ();
 
+#ifdef USERPROG
+	/* Initialize file descriptors. */
+	for (int i = 0; i < FD_MAX; i++) {
+		t->fd_file[i] = NULL;
+	}
+#endif
+
 	/* Call the kernel_thread if it scheduled.
 	 * Note) rdi is 1st argument, and rsi is 2nd argument. */
 	t->tf.rip = (uintptr_t) kernel_thread;
@@ -289,34 +296,6 @@ thread_unblock (struct thread *t) {
 	list_insert_ordered (&ready_list, &t->elem, thread_priority_greater, NULL);
 	t->status = THREAD_READY;
 	intr_set_level (old_level);
-
-}
-
-/* Adds the current thread to the sleeping list for the specified number of ticks. */
-/* 현재 스레드를 지정된 깨어날 틱에 맞춰 sleeping_list에 넣고 block 상태로 만든다. */
-void thread_add_to_sleeping_list (int64_t ticks) {
-	ASSERT (!intr_context ());
-	ASSERT (intr_get_level () == INTR_OFF);
-
-	struct thread *t = thread_current ();
-	t->wakeup_tick = ticks;
-	list_insert_ordered (&sleeping_list, &t->elem_sleep, thread_wakeup_tick_less, NULL);
-	thread_block ();
-}
-
-/* Wakes up any sleeping threads whose wakeup time has arrived. */
-/* 현재 틱 이하의 wakeup_tick을 가진 잠든 스레드들을 깨운다. */
-void thread_wakeup (int64_t ticks) {
-	ASSERT (intr_get_level () == INTR_OFF);
-
-	while (!list_empty (&sleeping_list)) {
-		struct thread *t = list_entry (list_front (&sleeping_list), struct thread, elem_sleep);
-		if (t->wakeup_tick > ticks) {
-			break;
-		}
-		list_pop_front (&sleeping_list);
-		thread_unblock (t);
-	}
 }
 
 
@@ -392,8 +371,7 @@ thread_yield (void) {
 /* 현재 스레드의 우선순위를 NEW_PRIORITY로 설정한다. */
 void
 thread_set_priority (int new_priority) {
-	thread_current ()->original_priority = new_priority;
-	refresh_priority (thread_current ());
+	thread_current ()->priority = new_priority;
 	if (ready_has_higher_priority ()) {
 		thread_yield ();
 	}
@@ -405,74 +383,6 @@ int
 thread_get_priority (void) {
 	return thread_current ()->priority;
 }
-
-void
-donate_priority (struct thread *donor, struct thread *recipient) {
-	/* donor가 recipient보다 우선순위가 낮거나 같으면 기부할 필요가 없다. */
-	if (recipient->priority >= donor->priority) {
-		return;
-	}
-
-	/* recipient의 effective priority를 donor의 priority로 올린다. */
-	recipient->priority = donor->priority;
-
-	/* recipient가 또 다른 lock을 기다리고 있으면 donation을 chain으로 전파한다. */
-	while (recipient->waiting_lock != NULL) {
-		/* recipient가 기다리는 lock을 들고 있는 다음 donation 대상이다. */
-		struct thread *next_recipient = recipient->waiting_lock->holder;
-		/* lock holder가 없으면 더 이상 donation을 전달할 대상이 없다. */
-		if (next_recipient == NULL) {
-			break;
-		}
-		/* 다음 holder의 priority가 더 낮을 때만 donation을 반영한다. */
-		if (recipient->priority > next_recipient->priority) {
-			next_recipient->priority = recipient->priority;
-		}
-		/* chain을 따라 다음 holder를 기준으로 계속 올라간다. */
-		recipient = next_recipient;
-	}
-}
-
-void
-remove_with_lock (struct lock *lock) {
-	/* 현재 스레드는 lock을 release하는 holder다. */
-	struct thread *current = thread_current ();
-	/* donations 리스트를 처음부터 순회한다. */
-	struct list_elem *e = list_begin (&current->donations);
-	/* 리스트 끝까지 보면서 release하는 lock 때문에 생긴 donation만 제거한다. */
-	while (e != list_end (&current->donations)) {
-		/* donation_elem을 가진 donor thread를 얻는다. */
-		struct thread *donor = list_entry (e, struct thread, donation_elem);
-		/* donor가 이 lock을 기다리고 있었다면 이 donation은 이제 끝난 것이다. */
-		if (donor->waiting_lock == lock) {
-			e = list_remove (e);
-		}
-		/* 다른 lock 때문에 들어온 donation이면 유지하고 다음 원소로 간다. */
-		else {
-			e = list_next (e);
-		}
-	}
-}
-
-void
-refresh_priority (struct thread *t) {
-	/* donation이 모두 사라졌을 때 돌아갈 기준 priority다. */
-	int max_priority = t->original_priority;
-	/* t가 받은 donation 목록을 훑기 위한 iterator다. */
-	struct list_elem *e;
-	/* 받은 donation 중 가장 높은 priority를 찾는다. */
-	for (e = list_begin (&t->donations); e != list_end (&t->donations); e = list_next (e)) {
-		/* donations 리스트의 각 원소는 donor thread의 donation_elem이다. */
-		struct thread *donor = list_entry (e, struct thread, donation_elem);
-		/* donor priority가 현재 최댓값보다 높으면 effective priority 후보를 갱신한다. */
-		if (donor->priority > max_priority)	{
-			max_priority = donor->priority;
-		}
-	}
-	/* original priority와 남은 donations 중 최댓값을 effective priority로 적용한다. */
-	t->priority = max_priority;
-}
-
 
 /* Sets the current thread's nice value to NICE. */
 void
@@ -561,10 +471,9 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->status = THREAD_BLOCKED;
 	strlcpy (t->name, name, sizeof t->name);
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
-	t->original_priority = priority;
+	list_init (&t->children);
+	t->exit_status = 0;
 	t->priority = priority;
-	list_init (&t->donations);
-	t->waiting_lock = NULL;
 	t->magic = THREAD_MAGIC;
 }
 
@@ -745,7 +654,6 @@ allocate_tid (void) {
 
 	return tid;
 }
-
 static bool	ready_has_higher_priority (void) {
 	if (list_empty (&ready_list)) {
 		return false;
@@ -753,4 +661,32 @@ static bool	ready_has_higher_priority (void) {
 	struct thread *curr = thread_current ();
 	struct thread *ready = list_entry (list_front (&ready_list), struct thread, elem);
 	return curr->priority < ready->priority;
+}
+
+void set_thread_name (const char *name) {
+	struct thread *curr = thread_current ();
+	size_t name_len = 0;
+
+	while (name[name_len]!=' ' && name[name_len]!='\0') {
+		name_len++;
+	}
+	
+	memcpy (curr->name, name, name_len);
+	curr->name[name_len] = '\0';
+}
+
+struct child_status *create_child_status (struct thread *parent) {
+	struct child_status *child = palloc_get_page (PAL_ZERO);
+	if (!child) {
+		return NULL;
+	}
+	child->tid = TID_ERROR;
+	child->exit_status = 0;
+	child->waited = false;
+	child->exited = false;
+	sema_init (&child->wait_sema, 0);
+
+	list_push_back (&parent->children, &child->elem);
+
+	return child;
 }

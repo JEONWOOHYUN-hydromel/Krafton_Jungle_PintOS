@@ -57,6 +57,7 @@ exception_init (void) {
 	/* Most exceptions can be handled with interrupts turned on.
 	   We need to disable interrupts for page faults because the
 	   fault address is stored in CR2 and needs to be preserved. */
+	
 	intr_register_int (14, 0, INTR_OFF, page_fault, "#PF Page-Fault Exception");
 }
 
@@ -68,6 +69,7 @@ exception_print_stats (void) {
 
 /* Handler for an exception (probably) caused by a user process. */
 static void
+/* exception.c */
 kill (struct intr_frame *f) {
 	/* This interrupt is one (probably) caused by a user process.
 	   For example, the process might have tried to access unmapped
@@ -83,9 +85,10 @@ kill (struct intr_frame *f) {
 		case SEL_UCSEG:
 			/* User's code segment, so it's a user exception, as we
 			   expected.  Kill the user process.  */
-			printf ("%s: dying due to interrupt %#04llx (%s).\n",
-					thread_name (), f->vec_no, intr_name (f->vec_no));
-			intr_dump_frame (f);
+			//printf ("%s: dying due to interrupt %#04llx (%s).\n",
+			//		thread_name (), f->vec_no, intr_name (f->vec_no));
+			//intr_dump_frame (f);
+			thread_current ()->exit_status = -1;
 			thread_exit ();
 
 		case SEL_KCSEG:
@@ -117,6 +120,7 @@ kill (struct intr_frame *f) {
    description of "Interrupt 14--Page Fault Exception (#PF)" in
    [IA32-v3a] section 5.15 "Exception and Interrupt Reference". */
 static void
+/* exception.c */
 page_fault (struct intr_frame *f) {
 	bool not_present;  /* True: not-present page, false: writing r/o page. */
 	bool write;        /* True: access was write, false: access was read. */
