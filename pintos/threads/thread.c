@@ -319,32 +319,6 @@ void thread_wakeup (int64_t ticks) {
 	}
 }
 
-/* Adds the current thread to the sleeping list for the specified number of ticks. */
-/* 현재 스레드를 지정된 깨어날 틱에 맞춰 sleeping_list에 넣고 block 상태로 만든다. */
-void thread_add_to_sleeping_list (int64_t ticks) {
-	ASSERT (!intr_context ());
-	ASSERT (intr_get_level () == INTR_OFF);
-
-	struct thread *t = thread_current ();
-	t->wakeup_tick = ticks;
-	list_insert_ordered (&sleeping_list, &t->elem_sleep, thread_wakeup_tick_less, NULL);
-	thread_block ();
-}
-
-/* Wakes up any sleeping threads whose wakeup time has arrived. */
-/* 현재 틱 이하의 wakeup_tick을 가진 잠든 스레드들을 깨운다. */
-void thread_wakeup (int64_t ticks) {
-	ASSERT (intr_get_level () == INTR_OFF);
-
-	while (!list_empty (&sleeping_list)) {
-		struct thread *t = list_entry (list_front (&sleeping_list), struct thread, elem_sleep);
-		if (t->wakeup_tick > ticks) {
-			break;
-		}
-		list_pop_front (&sleeping_list);
-		thread_unblock (t);
-	}
-}
 
 /* Returns the name of the running thread. */
 /* 현재 실행 중인 스레드의 이름을 반환한다. */

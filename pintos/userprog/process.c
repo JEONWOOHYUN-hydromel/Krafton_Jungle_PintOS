@@ -13,6 +13,7 @@
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
+#include "threads/malloc.h"
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/mmu.h"
@@ -573,12 +574,38 @@ install_page (void *upage, void *kpage, bool writable) {
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
+struct file_aux {
+    struct file *file;
+    off_t ofs;
+    uint32_t read_bytes;
+    uint32_t zero_bytes;
+};
+
+
 
 static bool
 lazy_load_segment (struct page *page, void *aux) {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+	if (aux == NULL)
+		return false;
+
+	struct file_aux *file_aux = aux;
+	bool succ = false;
+
+	if (page != NULL && page->frame != NULL && page->frame->kva != NULL){
+		if (file_read_at(file_aux->file,
+			page->frame->kva,
+			file_aux->read_bytes, file_aux->ofs) == (off_t)file_aux->read_bytes){
+			memset((uint8_t *)page->frame->kva + file_aux->read_bytes, 0, file_aux->zero_bytes);
+			succ = true;
+		}
+	}
+
+	file_close(file_aux->file);
+	free(file_aux);
+	return succ;
 }
 
 /* Loads a segment starting at offset OFS in FILE at address
@@ -610,15 +637,36 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
-		void *aux = NULL;
-		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
-					writable, lazy_load_segment, aux))
+		struct file_aux *aux = malloc (sizeof (struct file_aux));
+		if (aux == NULL)
 			return false;
+
+
+
+		*aux = (struct file_aux){
+			.file = file_reopen(file),
+			.ofs = ofs,
+			.read_bytes = page_read_bytes,
+			.zero_bytes = page_zero_bytes,
+		};
+
+		if (aux->file == NULL) {
+    		free (aux);
+			return false;
+		}
+
+		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
+					writable, lazy_load_segment, aux)) {
+			file_close(aux->file);
+			free(aux);
+			return false;
+		}
 
 		/* Advance. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
+		ofs += page_read_bytes;
 	}
 	return true;
 }
