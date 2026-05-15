@@ -6,7 +6,8 @@
 #include "vm/inspect.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
-
+#include "userprog/process.h"
+#include <string.h>
 
 /* Initializes the virtual memory subsystem by invoking each subsystem's
  * intialize codes. */
@@ -37,6 +38,8 @@ page_get_type (struct page *page) {
 }
 
 /* Helpers */
+static bool spt_alloc_page_with_initializer(struct supplemental_page_table *spt,
+		enum vm_type type, void *upage, bool writable,vm_initializer *init, void *aux);
 static struct frame *vm_get_victim (void);
 static bool vm_do_claim_page (struct page *page);
 static struct frame *vm_evict_frame (void);
@@ -51,12 +54,16 @@ static void page_destroy (struct hash_elem *e, void *aux UNUSED);
 bool
 vm_alloc_page_with_initializer (enum vm_type type, void *upage, bool writable,
 		vm_initializer *init, void *aux) {
+	struct supplemental_page_table *spt = &thread_current ()->spt;
+	return spt_alloc_page_with_initializer(spt, type, upage, writable, init, aux);
+}
+
+
+static bool
+spt_alloc_page_with_initializer (struct supplemental_page_table *spt, enum vm_type type, void *upage, bool writable,
+		vm_initializer *init, void *aux) {
 
 	ASSERT (VM_TYPE(type) != VM_UNINIT)
-
-	struct supplemental_page_table *spt = &thread_current ()->spt;
-
-
 
 	/* Check wheter the upage is already occupied or not. */
 	if (spt_find_page (spt, upage) != NULL)
@@ -283,13 +290,65 @@ supplemental_page_table_copy (struct supplemental_page_table *dst,
 
 	struct hash_iterator i;
 
-	hash_first (&i, &src->pages);
+	hash_first(&i, &src->pages);
 	while (hash_next (&i) != NULL) {
 		struct page *page = hash_entry (hash_cur (&i), struct page, hash_elem);
-		(void) page;
+
+		switch (VM_TYPE (page->operations->type)) {
+			case VM_UNINIT: {
+				struct file_aux *old_aux = page->uninit.aux;
+				struct file_aux *new_aux = malloc(sizeof *new_aux);
+				if (new_aux == NULL)
+					goto err;
+
+				*new_aux = *old_aux;
+				new_aux->file = file_reopen(old_aux->file);
+				if (new_aux->file == NULL){
+					free (new_aux);
+					goto err;
+				}
+
+				if (!spt_alloc_page_with_initializer (dst, page->uninit.type,
+						page->va, page->writable, page->uninit.init, new_aux)) {
+					file_close (new_aux->file);
+					free (new_aux);
+					goto err;
+				}
+
+				break;
+			}
+
+			case VM_ANON: {
+				if (page->frame == NULL || page->frame->kva == NULL)
+					goto err;
+
+				if (!spt_alloc_page_with_initializer(dst, VM_ANON, page->va, page->writable, NULL, NULL))
+					goto err;
+
+				struct page *new_page = spt_find_page (dst, page->va);
+				if (new_page == NULL)
+					goto err;
+
+				if (!vm_do_claim_page (new_page))
+					goto err;
+
+				memcpy (new_page->frame->kva, page->frame->kva, PGSIZE);
+				break;
+			}
+
+			case VM_FILE:
+				break;
+
+			default:
+				goto err;
+		}
 	}
 
 	return true;
+
+	err:
+		supplemental_page_table_kill(dst);
+		return false;
 }
 
 /* Free the resource hold by the supplemental page table */

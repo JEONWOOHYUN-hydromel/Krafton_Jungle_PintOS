@@ -90,7 +90,7 @@ initd (void *f_name) {
 
 	/* set thread name */
 	set_thread_name(file_name);
-	
+
 	palloc_free_page (info);
 
 #ifdef VM
@@ -112,7 +112,7 @@ process_fork (const char *name, struct intr_frame *if_) {
 	struct fork_info *info = palloc_get_page (PAL_ZERO);
 	if (info == NULL)
 		return TID_ERROR;
-	
+
 	info->parent = thread_current ();
 	memcpy (&info->if_, if_, sizeof (struct intr_frame));
 
@@ -234,7 +234,7 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
-	
+
 	// set prioity
 	thread_set_priority (parent->priority);
 
@@ -322,21 +322,21 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
-	
+
 	 struct thread *current = thread_current ();
 	 struct list_elem *e;
 
 	 for (e = list_begin (&current->children); e != list_end (&current->children);
 			e = list_next (e)) {
 		struct child_status *child = list_entry (e, struct child_status, elem);
-		
+
 		if (child->tid == child_tid) {
 			if (child->waited) {
 				return -1;
 			}
 
 			child->waited = true;
-			
+
 			if (!child->exited) {
 				sema_down (&child->wait_sema);
 			}
@@ -358,27 +358,27 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
-	
+
 	 // notice to parent process
 	if (curr->my_status != NULL) {
 		if (curr->my_status->is_orphan) {
 			palloc_free_page (curr->my_status);
 			curr->my_status = NULL;
-		} 
-		
+		}
+
 		else {
 			curr->my_status->exit_status = curr->exit_status;
 			curr->my_status->exited = true;
 			sema_up (&curr->my_status->wait_sema);
 		}
-		
+
 	}
 
 	// clean up child processes
 	while (!list_empty (&curr->children)) {
 		struct list_elem *e = list_pop_front (&curr->children);
 		struct child_status *child = list_entry (e, struct child_status, elem);
-		
+
 		if (child->exited) {
 			palloc_free_page (child);
 		} else {
@@ -531,7 +531,7 @@ load (const char *file_name, struct intr_frame *if_) {
 	if (parsed_file_name == NULL)
 		goto done;
 	file_name = parsed_file_name;
-	
+
 	/* Count arguments & put in argv */
 	argv[0] = parsed_file_name;
 	argc = 1;
@@ -801,14 +801,6 @@ install_page (void *upage, void *kpage, bool writable) {
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
-struct file_aux {
-    struct file *file;
-    off_t ofs;
-    uint32_t read_bytes;
-    uint32_t zero_bytes;
-};
-
-
 
 static bool
 lazy_load_segment (struct page *page, void *aux) {

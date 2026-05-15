@@ -298,6 +298,34 @@ thread_unblock (struct thread *t) {
 	intr_set_level (old_level);
 }
 
+/* Adds the current thread to the sleeping list for the specified wakeup tick. */
+void
+thread_add_to_sleeping_list (int64_t ticks) {
+	ASSERT (!intr_context ());
+	ASSERT (intr_get_level () == INTR_OFF);
+
+	struct thread *t = thread_current ();
+	t->wakeup_tick = ticks;
+	list_insert_ordered (&sleeping_list, &t->elem_sleep, thread_wakeup_tick_less, NULL);
+	thread_block ();
+}
+
+/* Wakes up any sleeping threads whose wakeup time has arrived. */
+void
+thread_wakeup (int64_t ticks) {
+	ASSERT (intr_get_level () == INTR_OFF);
+
+	while (!list_empty (&sleeping_list)) {
+		struct thread *t = list_entry (list_front (&sleeping_list),
+				struct thread, elem_sleep);
+		if (t->wakeup_tick > ticks)
+			break;
+
+		list_pop_front (&sleeping_list);
+		thread_unblock (t);
+	}
+}
+
 
 /* Returns the name of the running thread. */
 /* 현재 실행 중인 스레드의 이름을 반환한다. */

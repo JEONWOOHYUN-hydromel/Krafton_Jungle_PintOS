@@ -2,6 +2,9 @@
 #define USERPROG_PROCESS_H
 
 #include "threads/thread.h"
+#include <stdint.h>
+#include "filesys/file.h"
+#include "filesys/off_t.h"
 
 struct exec_info {
     char *file_name;
@@ -23,5 +26,11 @@ int process_wait (tid_t);
 void process_exit (void);
 void process_activate (struct thread *next);
 
+struct file_aux {
+    struct file *file;
+    off_t ofs;
+    uint32_t read_bytes;
+    uint32_t zero_bytes;
+};
 
 #endif /* userprog/process.h */
