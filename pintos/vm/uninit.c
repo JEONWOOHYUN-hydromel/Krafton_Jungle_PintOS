@@ -11,6 +11,8 @@
 #include "vm/vm.h"
 #include "vm/uninit.h"
 #include <debug.h>
+#include "threads/malloc.h"
+
 
 static bool uninit_initialize (struct page *page, void *kva);
 static void uninit_destroy (struct page *page);
@@ -66,4 +68,5 @@ uninit_destroy (struct page *page) {
 	struct uninit_page *uninit UNUSED = &page->uninit;
 	/* TODO: Fill this function.
 	 * TODO: If you don't have anything to do, just return. */
+	free(page->uninit.aux);
 }
