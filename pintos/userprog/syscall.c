@@ -73,6 +73,9 @@ void
 syscall_handler (struct intr_frame *f UNUSED) {
 	// TODO: Your implementation goes here.
 	uint64_t syscall_num = f->R.rax;
+#ifdef VM
+	thread_current ()->user_rsp = (void *) f->rsp;
+#endif
 	uint64_t ret = -1; // default return value is -1, which indicates an error
 	uint64_t arg[6] = {f->R.rdi, f->R.rsi, f->R.rdx, f->R.r10, f->R.r8, f->R.r9}; // syscall arguments
 
@@ -307,10 +310,15 @@ sys_close (int fd) {
 /* user buffer validation */
 static bool
 is_valid_user_buffer (const void *addr) {
-	if (addr == NULL || !is_user_vaddr(addr) || pml4_get_page(thread_current()->pml4, addr) == NULL) {
-		return false;
-	}
-	return true;
+    if (addr == NULL || !is_user_vaddr(addr))
+        return false;
+
+#ifdef VM
+    return spt_find_page(&thread_current()->spt, addr) != NULL
+           || pml4_get_page(thread_current()->pml4, addr) != NULL;
+#else
+    return pml4_get_page(thread_current()->pml4, addr) != NULL;
+#endif
 }
 
 static void
