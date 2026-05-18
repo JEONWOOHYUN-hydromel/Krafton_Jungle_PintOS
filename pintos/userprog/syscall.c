@@ -38,8 +38,8 @@ static void sys_close (int fd);
 
 
 /*user buffer test*/
-static bool is_valid_user_buffer (const void *addr);
-static void user_buffer_test_length (const void *buffer, unsigned size);
+static bool is_valid_user_buffer (const void *addr, bool writeOnUser);
+static void user_buffer_test_length (const void *buffer, unsigned size, bool writeOnUser);
 static void user_buffer_test_string (const void *buffer);
 
 /* System call.
@@ -233,7 +233,7 @@ sys_filesize (int fd){
 
 static int 
 sys_read (uint64_t fd, uint64_t buffer, uint64_t size){
-	user_buffer_test_length((const void *) buffer, (unsigned) size);
+	user_buffer_test_length((const void *) buffer, (unsigned) size, true);
 
 	if (fd == 0) { // read from console
 		for (unsigned i = 0; i < size; i++) {
@@ -259,7 +259,7 @@ sys_read (uint64_t fd, uint64_t buffer, uint64_t size){
 static int
 sys_write (uint64_t fd, uint64_t buffer, uint64_t size){
 	//buffer validation
-	user_buffer_test_length((const void *) buffer, (unsigned) size);
+	user_buffer_test_length((const void *) buffer, (unsigned) size, false);
 
 	if (fd == 1) { // write to console
 		putbuf((const char *) buffer, size);
@@ -309,30 +309,37 @@ sys_close (int fd) {
 
 /* user buffer validation */
 static bool
-is_valid_user_buffer (const void *addr) {
+is_valid_user_buffer (const void *addr, bool writeOnUser) {
     if (addr == NULL || !is_user_vaddr(addr))
         return false;
 
 #ifdef VM
-    return spt_find_page(&thread_current()->spt, addr) != NULL
-           || pml4_get_page(thread_current()->pml4, addr) != NULL;
+	struct thread *curr = thread_current();
+	struct page *page = spt_find_page (&curr->spt, addr);
+  	if (page != NULL) {
+		if (writeOnUser && !page->writable)
+				return false;
+		return true;
+	}
+
+ 	return is_stack_growth_candidate ((void *)addr, curr->user_rsp);
 #else
     return pml4_get_page(thread_current()->pml4, addr) != NULL;
 #endif
 }
 
 static void
-user_buffer_test_length (const void *buffer, unsigned size) {
+user_buffer_test_length (const void *buffer, unsigned size, bool writeOnUser) {
 	if (size == 0) {
 		return;
 	}
 
-	if (buffer == NULL || !is_valid_user_buffer(buffer) || !is_valid_user_buffer((const void *) ((uint64_t) buffer + size - 1))) {
+	if (buffer == NULL || !is_valid_user_buffer(buffer, writeOnUser) || !is_valid_user_buffer((const void *) ((uint64_t) buffer + size - 1), writeOnUser)) {
 		sys_exit(-1);
 	}
 
 	for (uint64_t start = (uint64_t) pg_round_down((uint64_t) buffer); start < (uint64_t) buffer + size; start += PGSIZE) {
-		if (!is_valid_user_buffer((const void *) start)) {
+		if (!is_valid_user_buffer((const void *) start, writeOnUser)) {
 			sys_exit(-1);
 		}
 	}
@@ -340,12 +347,12 @@ user_buffer_test_length (const void *buffer, unsigned size) {
 
 static void 
 user_buffer_test_string (const void *buffer) {
-	if (buffer == NULL || !is_valid_user_buffer(buffer)) {
+	if (buffer == NULL || !is_valid_user_buffer(buffer, false)) {
 		sys_exit(-1);
 	}
 
 	for (uint64_t i = 0; i < PGSIZE ; i++) {
-		if (!is_valid_user_buffer((const void *) ((uint64_t) buffer + i))) {
+		if (!is_valid_user_buffer((const void *) ((uint64_t) buffer + i), false)) {
 			sys_exit(-1);
 		}
 

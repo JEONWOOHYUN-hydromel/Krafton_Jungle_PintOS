@@ -233,18 +233,15 @@ vm_get_frame (void) {
 /* Growing the stack. */
 static bool
 vm_stack_growth (void *addr) {
-	uint8_t *fault_addr = addr;
+	void *upage = pg_round_down (addr);
 
-	if (addr == NULL || fault_addr + (1 * 1024 * 1024) > USER_STACK)
+	if (addr == NULL || is_kernel_vaddr (addr))
 		return false;
 
-	if (vm_alloc_page (VM_ANON | VM_MARKER_0, addr, true))
+	if (!vm_alloc_page (VM_ANON | VM_MARKER_0, upage, true))
 		return false;
 
-	if (!vm_claim_page (addr))
-		return false;
-
-	return true;
+	return vm_claim_page (upage);
 }
 
 /* Handle the fault on write_protected page */
@@ -270,7 +267,7 @@ vm_try_handle_fault (struct intr_frame *f, void *addr,
 	if ((page = spt_find_page(spt, addr)) == NULL) {
 		void *rsp = user ? (void *) f->rsp : thread_current ()->user_rsp;
 
-		if (rsp <= addr + 8)
+		if (is_stack_growth_candidate (addr, rsp))
 			if (vm_stack_growth (addr)) // stack growth!
 				return true;	// successed!
 			else
@@ -471,6 +468,12 @@ static void
 page_destroy (struct hash_elem *e, void *aux UNUSED) {
 	struct page *page = hash_entry (e, struct page, hash_elem);
 	vm_dealloc_page (page);
+}
+
+bool is_stack_growth_candidate (void *addr, void *rsp) {
+	return rsp <= addr + 8
+       && addr < USER_STACK
+       && addr >= USER_STACK - (1 << 20);
 }
 
 void
