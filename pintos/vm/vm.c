@@ -379,6 +379,9 @@ supplemental_page_table_copy (struct supplemental_page_table *dst,
 
 		switch (VM_TYPE (page->operations->type)) {
 			case VM_UNINIT: {
+				if (VM_TYPE (page->uninit.type) == VM_FILE)
+					break;
+
 				struct file_aux *old_aux = page->uninit.aux;
 				struct file_aux *new_aux = malloc(sizeof *new_aux);
 				if (new_aux == NULL)
