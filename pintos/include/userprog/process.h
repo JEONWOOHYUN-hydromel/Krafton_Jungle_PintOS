@@ -26,11 +26,4 @@ int process_wait (tid_t);
 void process_exit (void);
 void process_activate (struct thread *next);
 
-struct file_aux {
-    struct file *file;
-    off_t ofs;
-    uint32_t read_bytes;
-    uint32_t zero_bytes;
-};
-
 #endif /* userprog/process.h */

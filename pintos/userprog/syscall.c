@@ -35,6 +35,8 @@ static int sys_write (uint64_t fd, uint64_t buffer, uint64_t size);
 static void sys_seek (int fd, unsigned position);
 static unsigned sys_tell (int fd);
 static void sys_close (int fd);
+static void *sys_mmap (void *addr, size_t length, int writable, int fd, off_t offset);
+static void sys_munmap (void *addr);
 
 
 /*user buffer test*/
@@ -81,59 +83,67 @@ syscall_handler (struct intr_frame *f UNUSED) {
 
 	switch (syscall_num) {
 		case SYS_HALT:
-			sys_halt();
+			sys_halt ();
 			break;
 
 		case SYS_EXIT:
-			sys_exit(arg[0]); // arg[0] is the exit status
+			sys_exit (arg[0]); // arg[0] is the exit status
 			break;
 
 		case SYS_FORK:
-			ret = sys_fork((const char *) arg[0], f);
+			ret = sys_fork ((const char *) arg[0], f);
 			break;
 
 		case SYS_EXEC:
-			ret = sys_exec((const char *) arg[0]);
+			ret = sys_exec ((const char *) arg[0]);
 			break;
 
 		case SYS_WAIT:
-			ret = sys_wait((tid_t) arg[0]); // arg[0] is the child_tid
+			ret = sys_wait ((tid_t) arg[0]); // arg[0] is the child_tid
 			break;
 		
 		case SYS_CREATE:
-			ret = sys_create((const char *) arg[0], (unsigned) arg[1]);
+			ret = sys_create ((const char *) arg[0], (unsigned) arg[1]);
 			break;
 
 		case SYS_REMOVE:
-			ret = sys_remove((const char *) arg[0]);
+			ret = sys_remove ((const char *) arg[0]);
 			break;
 
 		case SYS_OPEN:
-			ret = sys_open((const char *) arg[0]);
+			ret = sys_open ((const char *) arg[0]);
 			break;
 
 		case SYS_FILESIZE:
-			ret = sys_filesize((int) arg[0]);
+			ret = sys_filesize ((int) arg[0]);
 			break;
 
 		case SYS_READ:
-			ret = sys_read(arg[0], arg[1], arg[2]);
+			ret = sys_read (arg[0], arg[1], arg[2]);
 			break;
 
 		case SYS_WRITE:
-			ret = sys_write(arg[0], arg[1], arg[2]); // arg[0] is fd, arg[1] is buffer, arg[2] is size
+			ret = sys_write (arg[0], arg[1], arg[2]); // arg[0] is fd, arg[1] is buffer, arg[2] is size
 			break;
 
 		case SYS_SEEK:
-			sys_seek((int) arg[0], (unsigned) arg[1]);
+			sys_seek ((int) arg[0], (unsigned) arg[1]);
 			break;
 
 		case SYS_TELL:
-			ret = sys_tell((int) arg[0]);
+			ret = sys_tell ((int) arg[0]);
 			break;
 
 		case SYS_CLOSE:
-			sys_close((int) arg[0]);
+			sys_close ((int) arg[0]);
+			break;
+
+		case SYS_MMAP:
+			ret = (uint64_t) sys_mmap ((void *) arg[0], (size_t) arg[1], (int) arg[2], (int) arg[3], (off_t) arg[4]);
+			break;
+
+		case SYS_MUNMAP:
+			sys_munmap ((void *) arg[0]);
 			break;
 
 		default:
@@ -190,35 +200,41 @@ sys_wait (tid_t child_tid){
 static bool 
 sys_create (const char *file, unsigned initial_size){	
 	user_buffer_test_string(file);
-	if (filesys_create(file, initial_size)) {
-		return true;
-	} else {
-		return false;
-	}
+
+	return filesys_create(file, initial_size);
 }
 
 static bool 
 sys_remove (const char *file){
 	user_buffer_test_string(file);
-	return filesys_remove(file);
+
+	bool result;
+
+	result = filesys_remove(file);
+
+	return result;
 }
 
 static int 
 sys_open (const char *file){
 	user_buffer_test_string(file);
-	
+
 	struct file *opened_file = filesys_open(file);
 	if (opened_file == NULL) {
 		return -1;
 	}
-	
+		
 	for (int fd = FD_MIN; fd < FD_MAX; fd++) {
 		if (thread_current()->fd_file[fd] == NULL) {
 			thread_current()->fd_file[fd] = opened_file;
 			return fd;
 		}
 	}
+
+	lock_acquire (filesys_lock);
 	file_close(opened_file); // No available file descriptor
+
+	lock_release (filesys_lock);
 	return -1;
 }
 
@@ -228,13 +244,18 @@ sys_filesize (int fd){
 		return -1;
 	}
 
-	return file_length(thread_current()->fd_file[fd]);
+	lock_acquire (filesys_lock);
+	off_t result = file_length(thread_current()->fd_file[fd]);
+
+	lock_release (filesys_lock);
+	return result;
 }
 
 static int 
 sys_read (uint64_t fd, uint64_t buffer, uint64_t size){
 	user_buffer_test_length((const void *) buffer, (unsigned) size, true);
 
+	off_t result;
 	if (fd == 0) { // read from console
 		for (unsigned i = 0; i < size; i++) {
 			((char *) buffer)[i] = input_getc();
@@ -250,7 +271,10 @@ sys_read (uint64_t fd, uint64_t buffer, uint64_t size){
 		if (file == NULL) {
 			return -1;
 		}
-		return file_read(file, (void *) buffer, size);
+		lock_acquire (filesys_lock);
+		result = file_read(file, (void *) buffer, size);
+		lock_release (filesys_lock);
+		return result;
 	}
 
 	return -1;
@@ -261,6 +285,7 @@ sys_write (uint64_t fd, uint64_t buffer, uint64_t size){
 	//buffer validation
 	user_buffer_test_length((const void *) buffer, (unsigned) size, false);
 
+	off_t result;
 	if (fd == 1) { // write to console
 		putbuf((const char *) buffer, size);
 		return size;
@@ -274,7 +299,10 @@ sys_write (uint64_t fd, uint64_t buffer, uint64_t size){
 		if (file == NULL) {
 			return -1;
 		}
-		return file_write(file, (const void *) buffer, size);
+		lock_acquire (filesys_lock);
+		result = file_write(file, (const void *) buffer, size);
+		lock_release (filesys_lock);
+		return result;
 	}
 	
 	return -1;
@@ -285,7 +313,9 @@ sys_seek (int fd, unsigned position) {
 	if (fd < FD_MIN || fd >= FD_MAX || thread_current()->fd_file[fd] == NULL){
 		return;
 	}
+	lock_acquire (filesys_lock);
 	file_seek(thread_current()->fd_file[fd], position);
+	lock_release (filesys_lock);
 }
 
 static unsigned 
@@ -293,7 +323,12 @@ sys_tell (int fd) {
 	if (fd < FD_MIN || fd >= FD_MAX || thread_current()->fd_file[fd] == NULL) {
 		return -1;
 	}
-	return file_tell(thread_current()->fd_file[fd]);
+	off_t result;
+	lock_acquire (filesys_lock);
+	result = file_tell(thread_current()->fd_file[fd]);
+
+	lock_release (filesys_lock);
+	return result;
 }
 
 static void 
@@ -302,10 +337,28 @@ sys_close (int fd) {
 		return;
 	}
 
+	lock_acquire (filesys_lock);
 	file_close(thread_current()->fd_file[fd]);
+
+	lock_release (filesys_lock);
 	thread_current()->fd_file[fd] = NULL;
 }
 
+static void*
+sys_mmap (void *addr, size_t length, int writable, int fd, off_t offset) {
+	struct file *file;
+
+	if (fd < FD_MIN || fd >= FD_MAX 
+		|| (file = thread_current()->fd_file[fd]) == NULL)
+		return NULL;
+
+	return do_mmap (addr, length, writable, file, offset);
+}
+
+static void
+sys_munmap (void *addr) {
+	do_munmap (addr);
+}
 
 /* user buffer validation */
 static bool

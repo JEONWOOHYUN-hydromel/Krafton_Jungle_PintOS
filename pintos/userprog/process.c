@@ -244,11 +244,15 @@ __do_fork (void *aux) {
 	//fd
 	for (int fd = 0; fd < FD_MAX; fd++) {
 		if (parent->fd_file[fd] != NULL) {
+			lock_acquire (filesys_lock);
 			current->fd_file[fd] = file_duplicate(parent->fd_file[fd]);
+			lock_release (filesys_lock);
 			if (current->fd_file[fd] == NULL) {
 				for (int i = 0; i < fd; i++) {
 					if (current->fd_file[i] != NULL) {
+						lock_acquire (filesys_lock);
 						file_close(current->fd_file[i]);
+						lock_release (filesys_lock);
 						current->fd_file[i] = NULL;
 					}
 				}
@@ -258,7 +262,9 @@ __do_fork (void *aux) {
 	}
 
 	if (parent->exec_file != NULL) {
+		lock_acquire (filesys_lock);
 		current->exec_file = file_duplicate(parent->exec_file);
+		lock_release (filesys_lock);
 		if (current->exec_file == NULL) {
 			goto error;
 		}
@@ -362,21 +368,6 @@ process_exit (void) {
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
-	 // notice to parent process
-	if (curr->my_status != NULL) {
-		if (curr->my_status->is_orphan) {
-			palloc_free_page (curr->my_status);
-			curr->my_status = NULL;
-		}
-
-		else {
-			curr->my_status->exit_status = curr->exit_status;
-			curr->my_status->exited = true;
-			sema_up (&curr->my_status->wait_sema);
-		}
-
-	}
-
 	// clean up child processes
 	while (!list_empty (&curr->children)) {
 		struct list_elem *e = list_pop_front (&curr->children);
@@ -397,8 +388,30 @@ process_exit (void) {
 		}
 	}
 
+	// code file
+	if (curr->exec_file != NULL) {
+		file_allow_write (curr->exec_file);
+		file_close (curr->exec_file);
+		curr->exec_file = NULL;
+	}
+
 	printf ("%s: exit(%d)\n", curr->name, curr->exit_status);
 	process_cleanup ();
+
+	 // notice to parent process
+	if (curr->my_status != NULL) {
+		if (curr->my_status->is_orphan) {
+			palloc_free_page (curr->my_status);
+			curr->my_status = NULL;
+		}
+
+		else {
+			curr->my_status->exit_status = curr->exit_status;
+			curr->my_status->exited = true;
+			sema_up (&curr->my_status->wait_sema);
+		}
+
+	}
 }
 
 /* Free the current process's resources. */
@@ -554,6 +567,7 @@ load (const char *file_name, struct intr_frame *if_) {
 	}
 
 	/* Read and verify executable header. */
+	lock_acquire (filesys_lock);
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
 			|| ehdr.e_type != 2
@@ -561,22 +575,30 @@ load (const char *file_name, struct intr_frame *if_) {
 			|| ehdr.e_version != 1
 			|| ehdr.e_phentsize != sizeof (struct Phdr)
 			|| ehdr.e_phnum > 1024) {
+		lock_release (filesys_lock);
 		printf ("load: %s: error loading executable\n", file_name);
 		goto done;
 	}
+	lock_release (filesys_lock);
 
 	/* Read program headers. */
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
 		struct Phdr phdr;
 
-		if (file_ofs < 0 || file_ofs > file_length (file))
+		lock_acquire (filesys_lock);
+		if (file_ofs < 0 || file_ofs > file_length (file)) {
+			lock_release (filesys_lock);
 			goto done;
+		}
 		file_seek (file, file_ofs);
 
-		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
+		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr) {
+			lock_release (filesys_lock);
 			goto done;
+		}
 		file_ofs += sizeof phdr;
+		lock_release (filesys_lock);
 		switch (phdr.p_type) {
 			case PT_NULL:
 			case PT_NOTE:

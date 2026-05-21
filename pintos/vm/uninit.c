@@ -12,6 +12,9 @@
 #include "vm/uninit.h"
 #include <debug.h>
 #include "threads/malloc.h"
+#include "threads/synch.h"
+#include "filesys/file.h"
+#include "filesys/filesys.h"
 
 
 static bool uninit_initialize (struct page *page, void *kva);
@@ -65,8 +68,16 @@ uninit_initialize (struct page *page, void *kva) {
  * PAGE will be freed by the caller. */
 static void
 uninit_destroy (struct page *page) {
-	struct uninit_page *uninit UNUSED = &page->uninit;
+	struct uninit_page *uninit = &page->uninit;
 	/* TODO: Fill this function.
 	 * TODO: If you don't have anything to do, just return. */
-	free(page->uninit.aux);
+	if (uninit->aux != NULL) {
+		struct file_aux *aux = uninit->aux;
+		if (aux->file != NULL) {
+			lock_acquire (filesys_lock);
+			file_close (aux->file);
+			lock_release (filesys_lock);
+		}
+		free (aux);
+	}
 }
